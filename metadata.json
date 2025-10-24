@@ -1,0 +1,8 @@
+{
+  "name": "精簡版gemini",
+  "description": "可以達成各種AI功能的應用程式",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
