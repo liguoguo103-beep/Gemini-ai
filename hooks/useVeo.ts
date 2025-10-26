@@ -1,6 +1,6 @@
-
 import { useState, useCallback, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
+import { ParsedApiError, parseGoogleGenAIError } from '../utils/error';
 
 interface VeoConfig {
   prompt: string;
@@ -13,20 +13,12 @@ interface VeoConfig {
 
 const VEO_POLLING_INTERVAL = 10000; // 10 seconds
 
-export const useVeo = () => {
+export const useVeo = (loadingMessages: string[], t: (key: string, params?: any) => string) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [progressMessage, setProgressMessage] = useState<string>('');
   const [isKeySelected, setIsKeySelected] = useState(false);
-
-  const loadingMessages = [
-    "Warming up the digital director's chair...",
-    "Choreographing pixels into motion...",
-    "Rendering your vision, frame by frame...",
-    "This can take a few minutes, the results are worth it!",
-    "Polishing the final cut...",
-  ];
 
   useEffect(() => {
     const checkKey = async () => {
@@ -46,16 +38,16 @@ export const useVeo = () => {
     }
   };
 
-  const generateVideo = useCallback(async (config: VeoConfig) => {
+  const generateVideo = useCallback(async (config: VeoConfig): Promise<Blob | null> => {
     setIsGenerating(true);
     setVideoUrl(null);
+    setVideoBlob(null);
     setError(null);
-    setProgressMessage(loadingMessages[0]);
 
     if (!isKeySelected) {
-      setError("Please select an API key to generate videos.");
+      setError(t('apiKeyRequired'));
       setIsGenerating(false);
-      return;
+      return null;
     }
 
     try {
@@ -71,58 +63,58 @@ export const useVeo = () => {
         },
       });
 
-      let messageIndex = 1;
-      const interval = setInterval(() => {
-        setProgressMessage(loadingMessages[messageIndex % loadingMessages.length]);
-        messageIndex++;
-      }, 7000);
-
       while (!operation.done) {
         await new Promise(resolve => setTimeout(resolve, VEO_POLLING_INTERVAL));
         operation = await ai.operations.getVideosOperation({ operation });
       }
       
-      clearInterval(interval);
-      
       if (operation.error) {
-          throw new Error(`Operation failed: ${operation.error.message}`);
+        // The operation itself can contain a structured error
+        throw new Error(`Operation failed: ${operation.error.message}`);
       }
 
       const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
       if (!downloadLink) {
-        throw new Error("Video generation completed, but no download link was found.");
+        throw new Error(t('error_unknown'));
       }
       
-      setProgressMessage("Fetching your video...");
-
       const videoResponse = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
       if (!videoResponse.ok) {
         throw new Error(`Failed to download video: ${videoResponse.statusText}`);
       }
       
-      const videoBlob = await videoResponse.blob();
-      const url = URL.createObjectURL(videoBlob);
+      const blob = await videoResponse.blob();
+      const url = URL.createObjectURL(blob);
       setVideoUrl(url);
+      setVideoBlob(blob);
+      return blob;
 
     } catch (e: any) {
         console.error("Veo generation error:", e);
-        let errorMessage = e.message || "An unknown error occurred.";
-        if (errorMessage.includes("Requested entity was not found")) {
-            errorMessage = "API Key validation failed. Please re-select your key and try again.";
+        // Handle specific case where user's selected key is bad
+        if (e.message?.includes("Requested entity was not found")) {
+            setError(t('error_apiKeyInvalid'));
             setIsKeySelected(false);
+        } else {
+            // Use the centralized parser for other errors
+            const { key, params } = parseGoogleGenAIError(e);
+            if (e instanceof ParsedApiError) {
+              setError(t(e.key, e.params));
+            } else {
+              setError(t(key, params));
+            }
         }
-        setError(errorMessage);
+        return null;
     } finally {
       setIsGenerating(false);
-      setProgressMessage('');
     }
-  }, [isKeySelected]);
+  }, [isKeySelected, t]);
 
   return {
     isGenerating,
     videoUrl,
+    videoBlob,
     error,
-    progressMessage,
     generateVideo,
     isKeySelected,
     selectApiKey,

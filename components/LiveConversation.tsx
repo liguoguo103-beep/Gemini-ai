@@ -1,11 +1,28 @@
-
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveSession } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Blob } from '@google/genai';
 import { decode, encode, decodeAudioData } from '../utils/media';
+import { useLanguage } from '../i18n/LanguageProvider';
+import { LANGUAGE_MAP } from '../services/geminiService';
+import { parseGoogleGenAIError } from '../utils/error';
+import { useTheme } from '../context/ThemeContext';
+import { Icon } from './Icon';
+
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+  alpha: number;
+}
 
 const LiveConversation: React.FC = () => {
+  const { t, language } = useLanguage();
+  const { theme, primaryColor, secondaryColor } = useTheme();
   const [isLive, setIsLive] = useState(false);
-  const [status, setStatus] = useState('Idle');
+  const [isPaused, setIsPaused] = useState(false);
+  const [showSubtitles, setShowSubtitles] = useState(true);
+  const [status, setStatus] = useState(t('statusIdle'));
   const [error, setError] = useState<string | null>(null);
   const [transcription, setTranscription] = useState<{ user: string, model: string, history: {speaker: 'user' | 'model', text: string}[] }>({
     user: '',
@@ -13,7 +30,7 @@ const LiveConversation: React.FC = () => {
     history: []
   });
   
-  const sessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
+  const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
@@ -21,6 +38,105 @@ const LiveConversation: React.FC = () => {
   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animationFrameIdRef = useRef<number | null>(null);
+  
+  // Use refs for state values needed in callbacks to avoid stale closures
+  const isLiveRef = useRef(isLive);
+  isLiveRef.current = isLive;
+  const isPausedRef = useRef(isPaused);
+  isPausedRef.current = isPaused;
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+  const colorsRef = useRef({primary: primaryColor, secondary: secondaryColor});
+  colorsRef.current = {primary: primaryColor, secondary: secondaryColor};
+
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    let particles: Particle[] = [];
+    const numParticles = 70;
+
+    const resizeCanvas = () => {
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+        particles = [];
+        for (let i = 0; i < numParticles; i++) {
+            particles.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                vx: (Math.random() - 0.5) * 0.6,
+                vy: (Math.random() - 0.5) * 0.6,
+                radius: Math.random() * 2 + 1,
+                alpha: Math.random() * 0.5 + 0.2,
+            });
+        }
+    };
+    
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    const animate = () => {
+        if (!ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const speedMultiplier = isLiveRef.current ? 3 : 1;
+        const connectionDistance = isLiveRef.current ? 160 : 120;
+
+        particles.forEach(p => {
+            p.x += p.vx * speedMultiplier;
+            p.y += p.vy * speedMultiplier;
+
+            if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
+            if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fillStyle = isLiveRef.current ? colorsRef.current.primary : (themeRef.current === 'dark' ? 'rgba(156, 163, 175, 0.6)' : 'rgba(100, 116, 139, 0.6)');
+            ctx.globalAlpha = p.alpha;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        });
+
+        for (let i = 0; i < particles.length; i++) {
+            for (let j = i + 1; j < particles.length; j++) {
+                const dist = Math.hypot(particles[i].x - particles[j].x, particles[i].y - particles[j].y);
+                if (dist < connectionDistance) {
+                    ctx.beginPath();
+                    ctx.moveTo(particles[i].x, particles[i].y);
+                    ctx.lineTo(particles[j].x, particles[j].y);
+                    const opacity = 1 - dist / connectionDistance;
+                    if(isLiveRef.current) {
+                        const gradient = ctx.createLinearGradient(particles[i].x, particles[i].y, particles[j].x, particles[j].y);
+                        gradient.addColorStop(0, `${colorsRef.current.primary}${Math.round(opacity*255).toString(16).padStart(2, '0')}`);
+                        gradient.addColorStop(1, `${colorsRef.current.secondary}${Math.round(opacity*255).toString(16).padStart(2, '0')}`);
+                        ctx.strokeStyle = gradient;
+                    } else {
+                         ctx.strokeStyle = themeRef.current === 'dark' ? `rgba(107, 114, 128, ${opacity * 0.25})` : `rgba(156, 163, 175, ${opacity * 0.25})`;
+                    }
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            }
+        }
+        animationFrameIdRef.current = requestAnimationFrame(animate);
+    };
+
+    animate();
+
+    return () => {
+        window.removeEventListener('resize', resizeCanvas);
+        if (animationFrameIdRef.current) {
+          cancelAnimationFrame(animationFrameIdRef.current);
+        }
+    };
+  }, []);
 
   const stopConversation = useCallback(() => {
     if (sessionPromiseRef.current) {
@@ -51,8 +167,10 @@ const LiveConversation: React.FC = () => {
     nextStartTimeRef.current = 0;
 
     setIsLive(false);
-    setStatus('Idle');
-  }, []);
+    setIsPaused(false);
+    setShowSubtitles(true);
+    setStatus(t('statusIdle'));
+  }, [t]);
   
   // Cleanup on unmount
   useEffect(() => {
@@ -63,19 +181,26 @@ const LiveConversation: React.FC = () => {
 
   const startConversation = async () => {
     if (isLive) return;
-    setIsLive(true);
+    
     setError(null);
-    setStatus('Connecting...');
+    setStatus(t('statusConnecting'));
     setTranscription({ user: '', model: '', history: [] });
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
+      
+      setIsLive(true);
+      setIsPaused(false);
 
       inputAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
       outputAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
       
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      
+      const langName = LANGUAGE_MAP[language] || 'English';
+      const systemInstruction = `CRITICAL: Your response MUST be entirely in ${langName}. Do not use any other language. You are a friendly conversational AI. Be concise.`;
+      
       sessionPromiseRef.current = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         config: {
@@ -83,17 +208,18 @@ const LiveConversation: React.FC = () => {
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: "You are a friendly conversational AI. Be concise."
+          systemInstruction: systemInstruction
         },
         callbacks: {
           onopen: () => {
-            setStatus('Connected. Speak now.');
-            const source = inputAudioContextRef.current!.createMediaStreamSource(streamRef.current!);
+            setStatus(t('statusConnected'));
+            const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
             mediaStreamSourceRef.current = source;
             const scriptProcessor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
             scriptProcessorRef.current = scriptProcessor;
 
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+              if (isPausedRef.current) return;
               const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
               const l = inputData.length;
               const int16 = new Int16Array(l);
@@ -129,7 +255,7 @@ const LiveConversation: React.FC = () => {
                   });
               }
 
-              const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
+              const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
               if (audioData) {
                   const audioCtx = outputAudioContextRef.current!;
                   nextStartTimeRef.current = Math.max(nextStartTimeRef.current, audioCtx.currentTime);
@@ -153,49 +279,91 @@ const LiveConversation: React.FC = () => {
           },
           onerror: (e) => {
             console.error('Live session error:', e);
-            setError('An error occurred during the session.');
+            const { key, params } = parseGoogleGenAIError(e);
+            setError(t(key, params));
             stopConversation();
           },
           onclose: () => {
-            setStatus('Session closed.');
+            setStatus(t('statusClosed'));
             stopConversation();
           },
         },
       });
     } catch (e: any) {
       console.error('Failed to start conversation:', e);
-      setError(e.message || 'Could not start microphone.');
+      const { key, params } = parseGoogleGenAIError(e);
+      setError(t(key, params) || t('micError'));
       stopConversation();
     }
   };
 
-  const toggleConversation = () => {
-    if (isLive) {
-      stopConversation();
-    } else {
-      startConversation();
-    }
+  const handleTogglePause = () => {
+    setIsPaused(prev => {
+        const isNowPaused = !prev;
+        if (isNowPaused) {
+            setStatus(t('statusPaused'));
+        } else {
+            setStatus(t('statusConnected'));
+        }
+        return isNowPaused;
+    });
   };
 
   return (
-    <div className="flex flex-col h-full bg-gray-800 rounded-lg shadow-xl p-6">
-      <h2 className="text-2xl font-bold text-white mb-4">Live Conversation & Transcription</h2>
-      <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 rounded-lg p-4">
-        <div className="text-center">
-            <button onClick={toggleConversation} className={`px-8 py-4 rounded-full font-bold text-lg transition-colors ${isLive ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'} text-white`}>
-                {isLive ? 'Stop Conversation' : 'Start Conversation'}
-            </button>
-            <p className="mt-4 text-gray-400">Status: {status}</p>
-            {error && <p className="mt-2 text-red-400">{error}</p>}
-        </div>
-        <div className="w-full mt-6 space-y-4 max-h-96 overflow-y-auto p-4 bg-gray-800 rounded-md">
+    <div className="flex flex-col w-full h-full bg-white/60 dark:bg-base-900/60 backdrop-blur-lg border border-primary/20 rounded-4xl shadow-2xl p-8">
+      <h2 className="text-3xl font-bold text-gradient mb-6">{t('liveConvTitle')}</h2>
+      <div className="relative flex-1 flex flex-col justify-end bg-gray-100 dark:bg-base-950/50 rounded-3xl p-4 overflow-hidden border border-primary/20">
+        <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full z-0" />
+        <div className={`relative z-10 w-full max-h-[calc(100%-150px)] overflow-y-auto space-y-4 p-4 transition-opacity duration-300 ${showSubtitles ? 'opacity-100' : 'opacity-0'}`}>
             {transcription.history.map((item, i) => (
-                <div key={i} className={`p-2 rounded-md ${item.speaker === 'user' ? 'bg-gray-700 text-right' : 'bg-blue-900/50 text-left'}`}>
-                    <span className="font-bold capitalize">{item.speaker}: </span>{item.text}
+                <div key={i} className={`flex w-full animate-fadeIn ${item.speaker === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] sm:max-w-xl md:max-w-3xl rounded-2xl p-3 shadow-sm text-gray-800 dark:text-gray-200 ${item.speaker === 'user' ? 'bg-gray-200 dark:bg-base-700/80' : 'bg-primary/20 dark:bg-primary/30'}`}>
+                        <p className="text-sm text-center sm:text-left">
+                            <span className="font-bold capitalize">{item.speaker === 'user' ? t('speakerUser') : t('speakerModel')}: </span>
+                            {item.text}
+                        </p>
+                    </div>
                 </div>
             ))}
-            {transcription.user && <div className="p-2 text-gray-400 text-right">User: {transcription.user}</div>}
-            {transcription.model && <div className="p-2 text-blue-300 text-left">Model: {transcription.model}</div>}
+            {transcription.user && (
+                <div className="flex w-full justify-end">
+                    <p className="w-full max-w-3xl text-sm text-gray-600 dark:text-gray-400 text-center sm:text-right">
+                        <span className="font-bold capitalize">{t('speakerUser')}: </span>
+                        {transcription.user}
+                    </p>
+                </div>
+            )}
+            {transcription.model && (
+                <div className="flex w-full justify-start">
+                     <p className="w-full max-w-3xl text-sm text-primary dark:text-primary/90 text-center sm:text-left">
+                        <span className="font-bold capitalize">{t('speakerModel')}: </span>
+                        {transcription.model}
+                    </p>
+                </div>
+            )}
+        </div>
+        <div className="relative z-10 flex flex-col items-center justify-center self-center mt-auto w-full">
+             <div className="relative z-10 text-center bg-white/50 dark:bg-base-900/50 backdrop-blur-sm p-4 rounded-3xl border border-primary/20">
+                {!isLive ? (
+                     <button onClick={startConversation} className="p-4 rounded-full bg-gradient-primary text-white transition-transform duration-200 hover:scale-110 active:scale-95 shadow-lg hover:shadow-glow-primary" aria-label={t('startCall')}>
+                        <Icon name="play" className="w-8 h-8"/>
+                    </button>
+                ) : (
+                    <div className="flex items-center justify-center gap-4">
+                        <button onClick={() => setShowSubtitles(s => !s)} className="p-3 rounded-full bg-gray-200 dark:bg-base-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-base-700 transition-all duration-200 active:scale-90 hover:scale-110" aria-label={showSubtitles ? t('hideSubtitles') : t('showSubtitles')}>
+                            <Icon name={showSubtitles ? 'subtitles' : 'subtitles-slash'} className="w-6 h-6"/>
+                        </button>
+                         <button onClick={handleTogglePause} className="p-4 rounded-full bg-white dark:bg-base-700 text-gray-900 dark:text-white transition-all duration-200 active:scale-95 shadow-md hover:scale-110 hover:shadow-glow-primary" aria-label={isPaused ? t('resumeCall') : t('pauseCall')}>
+                            <Icon name={isPaused ? 'play' : 'pause'} className="w-8 h-8"/>
+                        </button>
+                        <button onClick={stopConversation} className="p-3 rounded-full bg-red-600 text-white hover:bg-red-700 transition-all duration-200 active:scale-90 hover:scale-110" aria-label={t('endCall')}>
+                            <Icon name="close" className="w-6 h-6"/>
+                        </button>
+                    </div>
+                )}
+            </div>
+            <p className="mt-3 text-gray-600 dark:text-gray-400 text-sm bg-white/30 dark:bg-base-950/30 backdrop-blur-sm px-3 py-1 rounded-full">{t('status')}: {status}</p>
+            {error && <p className="mt-2 text-red-500 dark:text-red-400 bg-red-500/10 p-2 rounded-xl text-sm w-full max-w-md mx-auto">{error}</p>}
         </div>
       </div>
     </div>
